@@ -1,2 +1,0 @@
-# haractivity
-Useractivity
