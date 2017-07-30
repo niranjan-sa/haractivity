@@ -1,0 +1,253 @@
+---
+title: 'Persons-Activity'
+author: "Niranjan Agnihotri"
+date: "July 29, 2017"
+output: html_document
+fig_width: 8
+fig_height: 8
+---
+
+```{r setup, include=FALSE, echo=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(parallel)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(corrplot)
+library(doParallel)
+library(mlr)
+library(rpart)
+```
+## Introduction
+This project focuses on using the HAR data set to predict the quality of actions
+performed by the people base on the sensor data. First we download the data set from
+the sourses and start cleaning it.
+
+## Data Processing
+
+```{r}
+if(!file.exists('pml-training.csv')) {
+  download.file(url = 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv',
+                destfile = 'pml-training.csv')
+}
+if(!file.exists('pml-testing.csv')) {
+  download.file(url = 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv',
+                destfile = 'pml-testing.csv')
+}
+
+training <- read.csv(file = 'pml-training.csv')
+testing <- read.csv(file = 'pml-testing.csv')
+
+```
+As there are large number of features, we investigate whether all of them are
+useful. So we check for various properties of features and eliminate the extraneous 
+of them.
+First we check for NAs.
+
+```{r results='hide'}
+# Removing Columns have high NA values
+nas <- sapply(X = training, FUN = function(x) {print(mean(is.na(x))*100)})
+```
+```{r}
+print(table(nas))
+```
+
+From the above table we see that there is a pattern in the occurence of missing 
+values. There are around 67 variables with NAs. We drop them straight away.
+
+```{r}
+# Thus we remove 67 variables straightaway from training and test sets.
+nas <- nas[nas>0]
+na_attr <- names(nas)
+
+# Removing variable 'X'
+na_attr <- append(na_attr, c('X', 'user_name'))
+
+training <- training[, !(names(training) %in% na_attr)]
+testing <- testing[, !(names(testing) %in% na_attr)]
+
+#Deleting the near zero predictors
+nzv <- nearZeroVar(training[,-92], saveMetrics = FALSE, names = TRUE)
+
+training <- training[, !(names(training) %in% nzv)]
+testing <- testing[, !(names(testing) %in% nzv)]
+
+
+#dplyr
+train1 <- tbl_df(training)
+test1 <- tbl_df(testing)
+
+#Getting rid of timestamps as of now
+train1 <- train1[,-c(1:3)]
+test1 <- test1[,-c(1:3)]
+
+```
+Now, we eliminate the NearToZero variables. This will eliminate
+the variables that have very low variance. These variables contain very less
+information so we directly eliminate them. 
+Now, we find the, co relation between all the pairs of remaining variables.
+This, will give us insights about which variables are tightly corelated.
+If large number of variables are largely related that we eliminate one of the 
+corelated pair.
+```{r fig.width=10, fig.height=12, fig.align="center"}
+#co relation plot
+cor <- cor(train1[,-54])
+corrplot(cor, method = "color", type = "upper")
+
+#Comments on correlation
+```
+There are only a couple of variables who are strongly co related so,
+I don't intend to drop them as they are very few, rest the data set is ok.
+```{r}
+# creating partition of training set for validation afterwards.
+inTrain <- createDataPartition(train1$classe, p = .90, list = FALSE)
+train <- training[inTrain, ]
+test <- training[-inTrain, ]
+```
+
+## Principal components analysis
+Performing PCA and understand the nature of data.
+Plotting the PCA Components.
+```{r fig.width=12, fig.height=12, fig.align="center"}
+# strip some variables out
+y_train <- train[,57]
+train <- train[,-c(1,2,3,57)]
+
+
+# find the principal components
+pr <- prcomp(train, scale. = T)
+
+#set plotting parametersz
+biplot(pr, scale = 0, main="Plotting the Principal Components")
+```
+We can see several principal components highlighted by the red lines and
+along with that we can find that, there are 5 clusters that are formed.
+
+Now we plot the graphs showing the variance explained vs the number of components.
+To get the insights about how many componets are useful for prediction.
+```{r fig.width=12, fig.height=8, fig.align="center"}
+par(mfrow=c(1,2))
+# extract standard dev and computer variance
+std_dev <- pr$sdev
+pr_var <- std_dev^2
+
+print(pr_var[1:10])
+
+# compute the variance explained
+pr_varex <- pr_var/sum(pr_var)
+
+print(pr_varex[1:10])
+
+# Plot Principal components vs Variance Explained
+plot(pr_varex, xlab = "Principal Component",
+                ylab = "Variance Explained",
+                  type = "b")
+
+# Plot Cumulative proportion of var explained vs. Principal components
+plot(cumsum(pr_varex), xlab = "Principal Component",
+                ylab = "Cumulative Proportion of Variance Explained",
+                  type = "b")
+# Poiniting to 42 as the best principal no of components
+abline(h = 1)
+abline(v = 42)
+
+# Commenmts on Principal components
+```
+From the above figure we can conclude that,
+around 40 components cover the whole variance in the data set remaining components 
+do not add any significant accuracy towards the prediction.
+
+
+## Setting Parallel execution Environment 
+To speedup the execution of the models we set up a
+parallel environment.
+```{r, warning=FALSE}
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+```
+
+## Fitting a Decision Tree
+```{r, warning=FALSE}
+dim(train1)
+dim(train)
+dim(test1)
+dim(test)
+
+train = cbind(train, classe = y_train)
+test <- test[,-c(1:3)]
+
+rpart.mod <- rpart(classe~., data = train, method = "class")
+
+rpart.pred <- predict(rpart.mod, test)
+rpart.pred <- apply(X = rpart.pred, MARGIN = 1, FUN = function(x) {which.max(x)})
+rpart.pred <- as.factor(rpart.pred)
+levels(rpart.pred) <- c("A", "B", "C", "D", "E")
+rpart.pred <- unname(rpart.pred)
+
+print(confusionMatrix(rpart.pred, test$classe))
+```
+The performance of the decision tree on the test or hold out data set is not that 
+greatly impressive. That is why, we go for other models.
+We do not predict on the testing set with this model as it poorly performs on the hold out
+set.
+
+## Random Forest Performance on Hold out set
+Building random forest on the hold out set. Here, first we check the performance of 
+RF on our hold out set. If it is satisfactory, we proceed furthur to predict using the
+holdout set.
+```{r , warning=FALSE}
+# Setting cross validation control 
+fitControl <- trainControl(method = "cv",
+                           number = 2,
+                           allowParallel = TRUE)
+```
+```{r , warning=FALSE}
+# Training the RF of training set
+mod.fit <- caret::train(classe~., data = train, method = 'rf', trControl = fitControl)
+print(mod.fit$results)
+
+test.pred <- predict(mod.fit, newdata = test)
+print(confusionMatrix(test.pred, reference = test$classe))
+```
+The above results are impressive and we build a RF model on the whole data set again and
+use it to predict on the testing set.
+## Building Models Random Forest 
+```{r}
+model.fit <- caret::train(classe~., data = train1, method = "rf", trControl = fitControl)
+print(model.fit)
+
+names(test1)[54] <- "classe" 
+mod.pred <- predict(model.fit, newdata = test1)
+print(mod.pred)
+```
+These are the predictions on the testing set.
+
+## GBM
+Fitting a GBM on train set and predicting on the test set.
+```{r echo=FALSE, warning=FALSE}
+gbm.fit <- caret::train(classe~., data = train, method="gbm", verbose = FALSE)
+print(gbm.fit)
+
+test.pred <- predict(gbm.fit, newdata = test)
+
+```
+```{r}
+gbm.fit <- caret::train(classe~., data = train1, method="gbm", verbose = FALSE)
+print(confusionMatrix(test.pred, reference = test$classe))
+```
+```{r, warning=FALSE}
+gbm.pred <- predict(gbm.fit, newdata = test1)
+print(gbm.pred)
+print(mod.pred)
+```
+## Conclusion
+From the above results, we find the gbm and the RF models are performing 
+similarly and have successfully predicted all the 20 sample in the testing
+data set.
+
+
+```{r , warning=FALSE}
+# Stop the cluster
+stopCluster(cluster)
+registerDoSEQ()
+```
